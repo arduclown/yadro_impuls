@@ -10,74 +10,123 @@ import (
 type Competitor struct {
 	ID         int
 	Registered bool
-	StartDraw  time.Time // назначенное время старта при рег. ID = 2
-	StartReal  time.Time // реальное время старта ID = 4
-	Started    bool      // участник стартовал ID = 4
+
+	StartDraw time.Time // назначенное время старта при рег. ID = 2
+	StartReal time.Time // реальное время старта ID = 4
+	Started   bool      // участник стартовал ID = 4
 
 	FiringRange int // стрельбище (его номер)
+	Hits        int // кол-во попаданий
+	Shots       int // кол-во выстрелов
 
-	Hits  int // кол-во поподаний
-	Shots int // кол-во выстрелов
+	PenaltyL         int           // кол-во штрафных кругов
+	PenaltyTime      time.Duration // время на штрафном круге
+	PenaltyStartTime time.Time     //начало штрафного
+	SpeedPenalty     float64       // скорость на штрафном
 
-	PenaltyL     int           // кол-во штрафных кругов
-	PenaltyTime  time.Duration // время на шрафном крге
-	SpeedPenatly float64       // скорость на шрафном
+	CurLap       int       // номер текущего круга
+	Lap          []Laps    // инфа о текущем круге
+	LapStartTime time.Time // начало обычного круга
 
-	CurLap   int // номер текущего круга
-	SpeedLap float64
-
-	Finished   bool
-	FinishReal time.Time
-
-	CurTime time.Time
+	Finished    bool
+	FinishReal  time.Time
+	CurTime     time.Time
+	NotFinished bool
 }
 
-func (c *Competitor) FightForVictoryCheck(ev event.Event, conf config.Config) {
-	c.CurTime = ev.Time
+type Laps struct {
+	TimeSpent time.Duration
+	Speed     float64
+}
 
+func NewCompetitor(id int) *Competitor {
+	return &Competitor{
+		ID:               id,
+		Started:          false,
+		Finished:         false,
+		NotFinished:      false,
+		LapStartTime:     time.Time{},
+		PenaltyStartTime: time.Time{},
+	}
+}
+
+func (c *Competitor) FightForVictoryCheck(ev event.Event, conf *config.Config) []event.Event {
+	var out []event.Event
+
+	c.CurTime = ev.Time
 	switch ev.EventID {
-	case 1: // регистрация
+	case event.Registered:
 		c.Registered = true
-	case 2: // время назначенное жеребьёвкой
+	case event.StartTime:
 		sTime, _ := time.Parse("15:04:05.000", ev.ExtraParams[0])
 		c.StartDraw = sTime
-	case 3:
-	case 4: // реальный старт
+	case event.StartLine:
+	case event.Started:
 		c.Started = true
 		c.StartReal = ev.Time
-	case 5: // участник на стрельбище
-		c.Hits = 0         // обнулили счетчик на n-ом стрельбище
-		c.FiringRange += 1 // кол-во посещенных зон увличили
-	case 6: // участник попал в цель
-		c.Hits += 1
-		c.Shots += 1
-	case 7: // участник покинул стрельбище
-		// тут считаем сколько штрафных кругов ему накинут
-		misses := 5 - c.Hits%5 // пропущенные мишени
-		if misses != 0 {
+		c.LapStartTime = ev.Time
+		startDelta, _ := conf.StartDeltaDuration()
+		if c.StartDraw.Add(startDelta).Before(ev.Time) {
+			c.NotFinished = true
+			out = append(out, event.Event{
+				Time:         ev.Time,
+				EventID:      event.Disqualofies,
+				CompetitorID: c.ID,
+			})
+		}
+	case event.FiringRange:
+		c.Hits = 0
+		c.Shots = 0
+		c.FiringRange += 1
+	case event.HitTarget:
+		if c.Hits < 5 {
+			c.Hits += 1
+			c.Shots += 1
+		}
+	case event.LeftFR:
+		misses := 5 - c.Hits
+		if misses > 0 {
 			c.PenaltyL += misses
-			c.Shots += misses
 		}
-
-	case 8:
-
-	case 9: // участник покинул штрафной круг
-		duration := ev.Time.Sub(c.CurTime)
-		if c.PenaltyL > 0 {
-			c.PenaltyTime = duration
-
-			// скорость для всех штрафных кругов
-			c.SpeedPenatly = (conf.PenaltyLen * float64(c.PenaltyL)) / duration.Seconds()
+		c.Shots = 5
+	case event.EnterPenalty:
+		if c.PenaltyStartTime.IsZero() {
+			c.PenaltyStartTime = ev.Time
 		}
-
-	case 10:
-		c.CurLap += 1
-		//duration := ev.Time.Sub(c.StartReal)
-		if c.CurLap == conf.Laps {
-			c.Finished = true
-			c.FinishReal = c.CurTime
+	case event.LeftPentaly:
+		if c.PenaltyL > 0 && !c.PenaltyStartTime.IsZero() {
+			duration := ev.Time.Sub(c.PenaltyStartTime)
+			if duration > 0 {
+				c.PenaltyTime = duration
+				c.SpeedPenalty = (conf.PenaltyLen * float64(c.PenaltyL)) / duration.Seconds()
+				c.PenaltyL = 0
+				c.PenaltyStartTime = time.Time{}
+			}
 		}
-
+	case event.EndMainLap:
+		if !c.LapStartTime.IsZero() {
+			c.CurLap += 1
+			duration := ev.Time.Sub(c.LapStartTime)
+			if duration > 0 {
+				c.Lap = append(c.Lap, Laps{
+					TimeSpent: duration,
+					Speed:     conf.LapLen / duration.Seconds(),
+				})
+				c.LapStartTime = ev.Time
+			}
+			if c.CurLap == conf.Laps && !c.NotFinished {
+				c.Finished = true
+				c.FinishReal = c.CurTime
+				out = append(out, event.Event{
+					Time:         ev.Time,
+					EventID:      event.Finished,
+					CompetitorID: c.ID,
+				})
+			}
+		}
+	case event.NotContinue:
+		c.NotFinished = true
 	}
 
+	return out
 }

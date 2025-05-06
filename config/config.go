@@ -3,13 +3,14 @@ package config
 import (
 	"encoding/json"
 	"os"
+	"time"
 )
 
 type Config struct {
 	Laps        int
 	LapLen      float64
 	PenaltyLen  float64
-	FiringLines float64
+	FiringLines int
 	Start       string
 	StartDelta  string
 }
@@ -31,4 +32,12 @@ func LoadConf(input string) (*Config, error) {
 		return nil, err
 	}
 	return &conf, nil
+}
+
+func (c *Config) StartDeltaDuration() (time.Duration, error) {
+	t, err := time.Parse("15:04:05", c.StartDelta)
+	if err != nil {
+		return 0, err
+	}
+	return time.Duration(t.Hour())*time.Hour + time.Duration(t.Minute())*time.Minute + time.Duration(t.Second())*time.Second, nil
 }
